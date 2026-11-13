@@ -1,0 +1,157 @@
+You are a Senior Python Engineer and AI Agent Architect. Write ONE complete, working Python file named Annual_Report_Vision_Agent.py. It reads MULTIPLE reports of ONE company (up to 6 files, each report = ONE financial year), extracts the sheets and columns the USER SUPPLIES, processes all reports in one run, and returns ONE consolidated Excel workbook.
+
+RUN COMMAND: streamlit run Annual_Report_Vision_Agent.py
+
+=====================================================================
+1. GOAL
+=====================================================================
+- Zero hallucination. Extract ONLY what is printed in the report. If a value is not found, write "N/A".
+- User uploads 1 to 6 reports (.pdf or .xlsx, mixed allowed) or pastes direct PDF links, for the same company, e.g. FY2019 to FY2024. Each report is ONE financial year: extract only that report's current-year data and ignore prior-year comparatives.
+- User pastes a SHEET SPEC (the sheets and exact columns to extract). The script never hardcodes sheet or column names. Changing the spec changes the extraction, validation and workbook automatically.
+- One click processes all reports together and consolidates all rows into one workbook.
+
+=====================================================================
+2. TECH STACK (use only this)
+=====================================================================
+- Python 3.10+, Streamlit, PyMuPDF (fitz), openpyxl, python-dotenv, Pillow, requests (only to download direct PDF links), and the official SDKs (openai, google-generativeai, anthropic) imported lazily by provider.
+- concurrent.futures.ThreadPoolExecutor, max 3 workers, to process reports in parallel. No LangChain.
+- .env keys: VISION_PROVIDER (openai | gemini | anthropic), VISION_MODEL, and the matching API key. Never hardcode keys or model names. Temperature 0. JSON-only output.
+- Do not accept .docx.
+
+=====================================================================
+3. USER INPUTS (Streamlit sidebar / top of page)
+=====================================================================
+- company_name (text)
+- static_company_id (text, applied to every row)
+- rating_cycle_year (optional; if blank, write "N/A")
+- source_code (optional; if blank, write "N/A")
+- SHEET SPEC (text area OR .txt upload)
+- Reports: st.file_uploader(accept_multiple_files=True, max 6) and/or a text box of direct PDF links (one per line). A link that does not return a PDF is rejected with a clear message asking the user to upload the file instead.
+- Optional: upload an EXISTING output workbook to append new sheets to it (see APPEND MODE).
+
+=====================================================================
+4. SHEET SPEC FORMAT AND PARSER
+=====================================================================
+Spec lines look exactly like this (blank lines ignored):
+  1. COMPANY_PROFILES: static_company_id, financial_year, rating_cycle_year, ...
+  12. FINANCIAL_STATEMENT_LINES (EMPTY): line_code, static_company_id, ...
+  41. EMPLOYEE_TURNOVER: Static Company ID, Company, Sector, Financial Year, Reported Turnover Rate (%), ...
+Parser rules (function parse_sheet_spec()):
+- Regex per line: number, sheet name, optional "(EMPTY)", colon, comma-separated column list. Strip whitespace only. Never rename, rephrase, re-case or reorder anything. Column names may contain spaces, slashes, percent signs and parentheses (e.g. "Reported Turnover Rate (%)", "Source / Page"); keep them exactly.
+- A sheet marked (EMPTY) is created in the workbook with headers only (no rows) and is NEVER sent to the model. Remove the "(EMPTY)" text from the sheet name.
+- Excel sheet names are limited to 31 characters; if a name is longer, show a UI error and stop (never rename silently).
+- Show the parsed result in the UI (sheet count, column count per sheet, which are EMPTY) and require the user to confirm before extraction.
+- Internally key every column by index (c0, c1, ...) when talking to the model, and map back to the exact names when writing Excel. This prevents the model from misspelling or altering column names.
+- Store the final spec in SHEET_SCHEMAS = {sheet_name: {"empty": bool, "columns": [exact names]}}.
+- NO NEW SHEETS AND NO NEW COLUMNS in the main workbook. Only the sheets and columns in the spec appear in it.
+
+=====================================================================
+5. COLUMN CLASSES (decided by Python rules, not by the model)
+=====================================================================
+Classify each column by its name (case-insensitive, ignoring spaces/underscores) using a CONFIG dict at the top of the file that the user can edit:
+A. SYSTEM columns, filled by Python and NEVER requested from the model:
+   - static_company_id / "Static Company ID" -> the user's static_company_id
+   - company_name / "Company" -> the user's company_name
+   - financial_year / "Financial Year" -> the confirmed fiscal year of that report
+   - rating_cycle_year -> user input or "N/A"
+   - source_code -> user input or "N/A"
+   - retrieval_date -> today's date, YYYY-MM-DD
+   - source_location, source_page, source_page_or_section, "Source / Page" -> the formatted source string (see SOURCE PAGE RULE)
+   - record_key, and any column ending in _id or _code that identifies a row (e.g. object_id, relationship_id, policy_code): generate deterministically in Python as <static_company_id>-<SHEET>-<FY>-<row number>. Never ask the model to invent codes.
+   - data_status, verification_status, publication_status, verified_at: filled from STATUS_DEFAULTS at the top of the file (defaults: data_status "EXTRACTED", verification_status "UNVERIFIED", publication_status "DRAFT", verified_at "N/A"). The user can edit these.
+B. DERIVED columns, computed by Python from extracted numbers, never by the model. Put the rules in DERIVED_COLUMNS at the top. Default rule for EMPLOYEE_TURNOVER: Calculated Exit Rate (%) = Employee Exits / Average Headcount Used x 100; Average Headcount Used = reported average if present, else (Opening + Closing) / 2; Final Turnover / Attrition Rate (%) = reported rate if present, else calculated; write the method used into "Calculation / Selection Method". If inputs are missing, write "N/A".
+C. MODEL columns: everything else, extracted by the vision model from the report. `confidence` (high/medium/low) and `evidence_extract` (a verbatim quote of at most 25 words from the page) are MODEL columns.
+
+=====================================================================
+6. WORKFLOW (build in this order)
+=====================================================================
+Step 1 - Upload and hash. Hash each file for caching so reruns do not re-bill the same pages.
+Step 2 - Profile each report (cheap pass).
+  - PDF: use fitz text extraction per page. If a page has little or no text (scanned) or is mostly a table image, render it at 100-150 DPI and use vision for it. Pages with a good text layer are sent as text (cheaper); scanned pages and financial tables are sent as images.
+  - Excel: read cell values directly with openpyxl and send as text.
+  - Detect: report title (e.g. "MTN Nigeria Annual Report FY2022"), company_name, fiscal_year (integer, the report's CURRENT year), fiscal_year_end, and a PAGE INDEX (one short line of headings/topic per page).
+Step 3 - Confirm table (nothing is extracted until the user confirms). ONE editable table: file | ReportName | company detected | financial_year | fiscal year end | scale and currency per statement.
+  - Company check: normalise names (case, punctuation, Ltd/Plc/Limited). Flag any file not matching the majority and untick it by default.
+  - Duplicate-year guard: if two files resolve to the same year, flag both and require the user to keep one.
+  - Missing-year check: if selected years have a gap (e.g. 2019, 2020, 2022), warn in the UI and record MISSING YEAR in the audit file.
+  - If a scale is not visible, flag it and force the user to pick one. Never assume.
+  - Show an estimated cost BEFORE the user clicks extract.
+Step 4 - Button "Extract All Reports". For each confirmed report in parallel, for each non-EMPTY sheet:
+  a) PAGE RETRIEVAL: send the sheet name, its column names and the PAGE INDEX to the model (text only, cheap) and get back the relevant page numbers. Cap at 12 pages per sheet; if more are returned, process them in batches of 5.
+  b) EXTRACTION: send those pages (text, or 300 DPI image for scanned/table pages; full pages, no coordinate cropping) with the generated prompt. The model returns a JSON array of rows keyed c0, c1, ... for MODEL columns only, plus the helper fields in section 7.
+  c) One sheet can produce many rows (e.g. one row per director, subsidiary, shareholder, emission scope). A sheet with no evidence in the report produces ONE row with "N/A" in every model column, so the user can see it was checked and nothing was found.
+Step 5 - Normalise per report: apply scale conversion, negative-sign rule, date format, then fill SYSTEM and DERIVED columns.
+Step 6 - Consolidate: concatenate rows from all reports per sheet, sorted by financial_year then source order. No merging or de-duplication across reports (each year comes from exactly one report).
+Step 7 - QA checks (section 9), then build the output files (section 10).
+
+=====================================================================
+7. EXTRACTION PROMPT (generated per sheet from the parsed spec; embed this base string as BASE_EXTRACTION_PROMPT)
+=====================================================================
+"You are an expert data extraction assistant. Zero hallucination. Extract ONLY what is visibly present in the supplied report pages, for the stated financial year only. If a value is not found, return "N/A". Never guess, infer, estimate, round or fill gaps from outside knowledge. Keep exact names and wording as printed. Return RAW numbers exactly as printed; do NOT apply any scale conversion yourself. If the source shows brackets, e.g. (1,245,000), return -1245000. Numbers must be plain JSON numbers with no commas, brackets or currency symbols. Replace the bullet character with a hyphen in all text. Dates must be YYYY-MM-DD. Return JSON only."
+The script appends, per sheet: the sheet name, the MODEL columns as "c0: <exact name>, c1: <exact name>, ...", and these helper fields to return on every row:
+  _pages: list of page numbers (as labelled in the input) where the row's data was found
+  _scale: the scale stated for the figures on those pages: "units" | "thousands" | "millions" | "billions" (plus currency if shown)
+  _scale_fields: list of column keys (c0, c1...) whose values are money amounts expressed in that scale
+  _raw: object mapping each key in _scale_fields to the number exactly as displayed
+Every page sent is labelled "PAGE <n>" so the model can cite it.
+
+=====================================================================
+8. SCALE, NEGATIVES, SOURCE PAGE
+=====================================================================
+SCALE (done in Python, once, only for keys listed in _scale_fields):
+- thousands / '000 -> x 1,000; millions -> x 1,000,000; billions -> x 1,000,000,000; units -> x 1.
+- The scale comes from the confirm table (user-editable per report), with the model's _scale used only to flag a mismatch.
+- Output stays NUMERIC (Excel number_format '#,##0.##' so commas display). Example: revenue shown as 2,012,272 with figures in million -> cell value 2012272000000. Do not scale counts, percentages, prices per share or ratios.
+- Keep the raw value and scale for the audit file.
+- apply_negative_sign_rule(): safety net that turns strings like "(1,245)" into -1245.
+
+SOURCE PAGE RULE:
+- Format exactly: `ReportName (pg X)` or `ReportName (pg X, Y, Z)` with ALL pages listed, comma separated, e.g. `MTN Nigeria Annual Report FY2022 (pg 12, 23, 45)`.
+- ReportName comes from the confirm table. Page numbers are the PRINTED page numbers of the report when they can be read (or from fitz page labels); otherwise the PDF page index. Add a setting PAGE_NUMBERING = "printed" | "pdf_index" (default "printed") and state the choice in the audit file.
+- Write this string into source_location AND into every other source-page column present in the sheet.
+- If a row has no page evidence, write `Source on Website - No Report Page`. Never invent a page.
+
+=====================================================================
+9. QA CHECKS (Python, never auto-correct data)
+=====================================================================
+- Evidence check: for text-layer pages, verify each row's evidence_extract appears in the page text (whitespace-normalised). If not, mark that row UNVERIFIED QUOTE in the audit file. Never delete the row.
+- Page check: every cited page must exist in the file; otherwise flag.
+- Financial checks per year where both sides exist: Total Assets = Total Equity + Total Liabilities; Profit After Tax equal across COMPANY_PROFILES and FINANCIALS; cash equivalents consistent. Tolerance 0.5% of the larger value or 1 unit. Statuses: PASS, CHECK FAILED, NOT TESTABLE.
+- Cross-year continuity (only if the sheets exist in the spec): closing cash of year N = opening cash of year N+1 report, mismatch = REVIEW (restatements are normal).
+- Schema check: drop unknown keys, fill missing keys with "N/A", coerce types, log failing rows.
+- Failures in one report or sheet must not stop the batch: log and continue. Unreadable or blank pages are logged as UNREADABLE PAGE with the page number.
+- Retry API failures 3 times with a 5 second delay, with extra backoff on rate limits.
+
+=====================================================================
+10. OUTPUT FILES
+=====================================================================
+FILE 1 - MAIN WORKBOOK (strict): named `<company_name>_<years>.xlsx` using underscores, e.g. `MTN_Nigeria_FY2019-FY2024.xlsx` (single year: `MTN_Nigeria_FY2022.xlsx`).
+- Sheets = exactly the spec sheets, in spec order, with exact names. Row 1 = exact column headers. Data from row 2. No extra header rows, no extra sheets, no extra columns. Cells with no value contain "N/A". EMPTY sheets contain headers only.
+FILE 2 - AUDIT WORKBOOK: named `<same name>_AUDIT.xlsx` with:
+- Extraction_Audit: sheet, row_key, column, raw_value_as_displayed, scale_found, conversion_factor, final_value, source_pages, quote_verified
+- Validation_Report: check_name, financial_year, source_file, expected_value, actual_value, difference, status, notes
+- Summary: total records per sheet per financial year, and the confirmation line "All sources are report pages" or a list of rows that used `Source on Website - No Report Page`.
+APPEND MODE: if the user uploads an existing output workbook plus a new spec, add ONLY the new sheets to it. Never overwrite or modify existing sheets; if a sheet name already exists, stop and ask. The workbook keeps its original name.
+
+=====================================================================
+11. STREAMLIT UI
+=====================================================================
+- Title: Annual Report Vision Agent.
+- Step 1 inputs (section 3). Step 2 parsed-spec preview and confirmation. Step 3 report confirm table with checks. Step 4 "Extract All Reports".
+- st.progress overall plus one st.status block per report showing sheets as they complete; live count of rows per sheet.
+- Tokens and cost per report and per run, from the API response usage (not guesses); an estimate before extraction.
+- After extraction: Validation Report table, per-sheet preview (st.tabs or selectbox), the Summary table, and two st.download_buttons (main workbook, audit workbook).
+
+=====================================================================
+12. CODE QUALITY
+=====================================================================
+- Required functions: parse_sheet_spec(), classify_columns(), fetch_pdf_from_url(), convert_pdf_to_images(), read_excel_input(), detect_report_profile(), check_company_consistency(), check_year_coverage(), retrieve_pages_for_sheet(), build_extraction_prompt(), extract_sheet_with_vision(), validate_rows_against_schema(), apply_conversion(), apply_negative_sign_rule(), fill_system_columns(), compute_derived_columns(), verify_evidence(), process_one_report(), consolidate_reports(), run_qa_checks(), build_workbook(), build_audit_workbook(), append_to_workbook(), main().
+- Comment every function. End with: if __name__ == "__main__": main()
+- Requirements as a comment at the top: streamlit, openai, google-generativeai, anthropic, PyMuPDF, openpyxl, python-dotenv, Pillow, requests
+- Config block at the top: STATUS_DEFAULTS, DERIVED_COLUMNS, PAGE_NUMBERING, MAX_WORKERS=3, MAX_PAGES_PER_SHEET=12.
+- Render pages into a temp_images folder (one subfolder per report) and delete it after the run.
+- No placeholders, no pass, no TODO. Fully working code.
+- End the file with a HOW TO RUN section: create .env (VISION_PROVIDER, VISION_MODEL, API key), pip install -r requirements, run streamlit run Annual_Report_Vision_Agent.py
+
+OUTPUT
+Give the complete file in one code block. If it would be cut off by length, stop at a clean function boundary and continue in the next message when I say "continue".

@@ -1,0 +1,28 @@
+# Local Python environments, caches and editor secrets
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Temporary agent files and model response cache
+.annual_report_vision_cache/
+temp_images/
+
+# Financial reports and generated data; do not publish accidentally
+*.pdf
+*.xlsx
+*.xls
+outputs/
+data/
+
+# OS and editor clutter
+.DS_Store
+Thumbs.db
+.vscode/*.log

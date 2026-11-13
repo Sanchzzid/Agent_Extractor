@@ -1,0 +1,9 @@
+streamlit
+openai
+google-generativeai
+anthropic
+PyMuPDF
+openpyxl
+python-dotenv
+Pillow
+requests
