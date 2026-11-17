@@ -1,0 +1,5 @@
+1. FINANCIALS: static_company_id, financial_year, currency, revenue, profit_before_tax, profit_after_tax, total_assets, total_liabilities, total_equity, source_location, verification_status
+2. DIRECTORS: static_company_id, financial_year, record_key, full_name, board_role, director_type, gender, nationality, source_location, verification_status
+3. CLIMATE_EMISSIONS: static_company_id, financial_year, scope_type, emissions_value, unit, reporting_boundary, methodology, source_location, verification_status
+4. WORKFORCE: static_company_id, financial_year, total_employees, source_location, verification_status
+5. SUPPLIERS (EMPTY): static_company_id, financial_year, supplier_code, supplier_name
